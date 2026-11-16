@@ -1,0 +1,15 @@
+[package]
+name = "ferd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+iroh = "1.4.1"
+notify = "8.2.2"
+rfd = "0.18.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlparser = "0.64.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "macros", "io-util"] }
