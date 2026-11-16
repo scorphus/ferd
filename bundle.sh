@@ -23,7 +23,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleName</key><string>Ferd</string>
     <key>CFBundleDisplayName</key><string>Ferd</string>
-    <key>CFBundleIdentifier</key><string>io.github.ferd</string>
+    <key>CFBundleIdentifier</key><string>io.github.scorphus.ferd</string>
     <key>CFBundleExecutable</key><string>Ferd</string>
     <key>CFBundleIconFile</key><string>Ferd</string>
     <key>CFBundlePackageType</key><string>APPL</string>

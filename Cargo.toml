@@ -3,6 +3,8 @@ name = "ferd"
 version = "0.1.0"
 edition = "2024"
 license = "BSD-3-Clause"
+description = "Draw database tables as boxes you can drag, and keep where you put them"
+repository = "https://github.com/scorphus/ferd"
 
 [dependencies]
 eframe = "0.37.0"
