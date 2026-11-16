@@ -1,5 +1,7 @@
 mod arrange;
 mod layout;
+#[cfg(target_os = "macos")]
+mod macos;
 mod mermaid;
 mod model;
 mod share;
@@ -29,6 +31,8 @@ const TAG_W: f32 = 24.0;
 const GAP: f32 = 70.0;
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "macos")]
+    macos::listen();
     let mut args = std::env::args_os().skip(1);
     let first = args.next();
     let (path, ticket) = match first {
@@ -899,6 +903,10 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        for path in macos::opened(ui.ctx()) {
+            self.open(ui.ctx(), path);
+        }
         self.reload_if_changed();
         self.handle_session(ui.ctx());
         let exporting = self.export.is_some();
