@@ -3,7 +3,7 @@ use sqlparser::ast::{
     ColumnOption, CommentObject, Expr, ObjectName, Query, SelectItem, SetExpr, Statement,
     TableConstraint,
 };
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
@@ -21,8 +21,14 @@ struct CommentOn {
 }
 
 pub fn parse(src: &str) -> Diagram {
-    let dialect = PostgreSqlDialect {};
-    let Ok(tokens) = Tokenizer::new(&dialect, src).tokenize() else {
+    let lower = src.to_lowercase();
+    let mysql = src.contains('`') || lower.contains("auto_increment") || lower.contains("engine=");
+    let (dialect, other): (&dyn Dialect, &dyn Dialect) = if mysql {
+        (&MySqlDialect {}, &PostgreSqlDialect {})
+    } else {
+        (&PostgreSqlDialect {}, &MySqlDialect {})
+    };
+    let Ok(tokens) = Tokenizer::new(dialect, src).tokenize() else {
         return Diagram::default();
     };
     let mut diagram = Diagram::default();
@@ -31,9 +37,14 @@ pub fn parse(src: &str) -> Diagram {
 
     for segment in split_statements(tokens) {
         let segment = strip_with_data(segment);
-        let Ok(statement) = Parser::new(&dialect)
+        let Ok(statement) = Parser::new(dialect)
             .with_tokens(segment.clone())
             .parse_statement()
+            .or_else(|_| {
+                Parser::new(other)
+                    .with_tokens(segment.clone())
+                    .parse_statement()
+            })
         else {
             continue;
         };
@@ -552,6 +563,19 @@ mod tests {
              create index i on t using btree (a);",
         );
         assert_eq!(d.tables.len(), 1);
+    }
+
+    #[test]
+    fn mysql_tables() {
+        let d = parse(
+            "create table if not exists a\n(\n    id int auto_increment\n        primary key,\n    \
+             `b_id` int null,\n    updated timestamp null on update CURRENT_TIMESTAMP,\n    \
+             constraint a_b foreign key (b_id) references b (id)\n);",
+        );
+        let a = table(&d, "a");
+        assert!(column(a, "id").pk);
+        assert!(column(a, "b_id").fk);
+        assert!(link(&d, "b", "a", "b_id"));
     }
 
     #[test]
