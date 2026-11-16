@@ -3,6 +3,8 @@
 Ferd draws the tables of a database as boxes you can drag around, and keeps
 where you put them.
 
+![A library schema in Ferd](assets/screenshot.png)
+
 It reads:
 
 - Markdown files with mermaid `erDiagram` blocks. Each block becomes one
