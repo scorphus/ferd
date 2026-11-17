@@ -34,7 +34,7 @@ the source changes on disk, Ferd reloads it and keeps the positions.
 cargo run --release -- path/to/schema.md
 ```
 
-`./bundle.sh` builds `target/Ferd.app` for macOS.
+`./bundle.sh [target]` builds `target/<target>/Ferd.app` for macOS, for this Mac's CPU unless a target such as `x86_64-apple-darwin` is given; `-i` installs it into `/Applications`.
 
 ## Sharing
 

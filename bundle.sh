@@ -1,12 +1,22 @@
 #!/bin/sh
 set -e
 cd "$(dirname "$0")"
-cargo build --release
+install=false
+while getopts i flag; do
+    case $flag in
+        i) install=true ;;
+        *) echo "usage: $0 [-i] [target]" >&2; exit 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
+target=${1:-$(rustc -vV | sed -n 's/^host: //p')}
+rustup target add "$target"
+cargo build --release --target "$target"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-app=target/Ferd.app
+app=target/$target/Ferd.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/ferd "$app/Contents/MacOS/Ferd"
+cp "target/$target/release/ferd" "$app/Contents/MacOS/Ferd"
 set_dir=target/Ferd.iconset
 rm -rf "$set_dir"
 mkdir "$set_dir"
@@ -45,4 +55,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 codesign --force -s - "$app"
+if [ "$install" = true ]; then
+    rm -rf /Applications/Ferd.app
+    mv "$app" /Applications/Ferd.app
+    app=/Applications/Ferd.app
+fi
 echo "$app"
