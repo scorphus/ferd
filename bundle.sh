@@ -44,4 +44,5 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+codesign --force -s - "$app"
 echo "$app"
