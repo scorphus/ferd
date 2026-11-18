@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          for arch in aarch64 x86_64; do
+            ./bundle.sh "$arch-apple-darwin"
+            ditto -c -k --keepParent "target/$arch-apple-darwin/Ferd.app" "Ferd-$arch.zip"
+          done
+      - run: gh release create "$GITHUB_REF_NAME" Ferd-*.zip --notes-file .github/release-notes.md --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
