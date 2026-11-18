@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod arrange;
 mod layout;
 #[cfg(target_os = "macos")]
