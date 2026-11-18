@@ -48,6 +48,8 @@ fn main() -> eframe::Result {
             .with_icon(icon()),
         ..Default::default()
     };
+    #[cfg(windows)]
+    let options = dx12_unless_chosen(options);
     eframe::run_native(
         "Ferd",
         options,
@@ -1495,6 +1497,17 @@ fn label_spot(pts: &[Pos2], size: Vec2, boxes: &[Rect], taken: &[Rect]) -> Rect 
         }
     }
     best.1
+}
+
+// Intel's Vulkan driver crashes while wgpu sets up the device on some laptops.
+#[cfg(windows)]
+fn dx12_unless_chosen(mut options: eframe::NativeOptions) -> eframe::NativeOptions {
+    if std::env::var_os("WGPU_BACKEND").is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+    }
+    options
 }
 
 fn icon() -> egui::IconData {
