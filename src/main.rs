@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use eframe::egui::emath::TSTransform;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2,
     pos2, vec2,
@@ -29,6 +30,12 @@ const ROW_H: f32 = 19.0;
 const PAD: f32 = 10.0;
 const TAG_W: f32 = 24.0;
 const GAP: f32 = 70.0;
+const MIN_ZOOM: f32 = 0.1;
+const MAX_ZOOM: f32 = 4.0;
+const MAX_FIT_ZOOM: f32 = 1.5;
+const SAME_COST: f32 = 0.5;
+const SIDE_BY_SIDE: f32 = 40.0;
+const LANE: f32 = 9.0;
 
 fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
@@ -144,6 +151,24 @@ impl Default for View {
             offset: vec2(40.0, 40.0),
             zoom: 1.0,
         }
+    }
+}
+
+impl View {
+    fn to_screen(self, canvas: Pos2) -> TSTransform {
+        TSTransform::new(canvas.to_vec2() + self.offset, self.zoom)
+    }
+
+    fn to_world(self, canvas: Pos2) -> TSTransform {
+        self.to_screen(canvas).inverse()
+    }
+
+    fn zoomed(self, factor: f32, canvas: Pos2, pointer: Pos2) -> View {
+        let anchor = self.to_world(canvas) * pointer;
+        let zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let mut view = View { zoom, ..self };
+        view.offset += pointer - view.to_screen(canvas) * anchor;
+        view
     }
 }
 
@@ -687,33 +712,26 @@ impl App {
             .get(src.title())
             .cloned()
             .unwrap_or_default();
-        let world: Vec<Rect> = tables
-            .iter()
-            .zip(&sizes)
-            .map(|(t, s)| Rect::from_min_size(Pos2::from(dl.positions[&t.name]), *s))
-            .collect();
+        let world = world_rects(&tables, &sizes, &dl);
 
         if self.fit_pending || matches!(self.export, Some(Export::Fitting { .. })) {
             self.view = fit(&world, rect);
             self.fit_pending = false;
         }
 
-        let view = self.view;
-        let to_world = |p: Pos2| ((p - rect.min - view.offset) / view.zoom).to_pos2();
+        let to_world = self.view.to_world(rect.min);
 
         if let Some(pointer) = response.hover_pos() {
             let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
             let factor = pinch * (scroll * 0.0015).exp();
             if factor != 1.0 {
-                let anchor = to_world(pointer);
-                self.view.zoom = (self.view.zoom * factor).clamp(0.1, 4.0);
-                self.view.offset = pointer - rect.min - anchor.to_vec2() * self.view.zoom;
+                self.view = self.view.zoomed(factor, rect.min, pointer);
             }
         }
         if response.clicked()
             && let Some(p) = response.interact_pointer_pos()
         {
-            let w = to_world(p);
+            let w = to_world * p;
             let hit = world
                 .iter()
                 .rposition(|r| r.contains(w))
@@ -723,7 +741,7 @@ impl App {
         if response.drag_started()
             && let Some(p) = response.interact_pointer_pos()
         {
-            let w = to_world(p);
+            let w = to_world * p;
             self.dragging = world
                 .iter()
                 .rposition(|r| r.contains(w))
@@ -766,14 +784,10 @@ impl App {
             .get(src.title())
             .cloned()
             .unwrap_or_default();
-        let screen: Vec<Rect> = tables
-            .iter()
-            .zip(&sizes)
-            .map(|(t, s)| {
-                let min = rect.min + view.offset + Vec2::from(dl.positions[&t.name]) * view.zoom;
-                Rect::from_min_size(min, *s * view.zoom)
-            })
-            .collect();
+        let world = world_rects(&tables, &sizes, &dl);
+        let to_screen = view.to_screen(rect.min);
+        let to_world = view.to_world(rect.min);
+        let screen: Vec<Rect> = world.iter().map(|&r| to_screen * r).collect();
         let index = |name: &str| tables.iter().position(|t| t.name == name);
 
         let links: Vec<(Link, bool)> = src.links().map(|(l, h)| (l.clone(), h)).collect();
@@ -781,7 +795,10 @@ impl App {
             .iter()
             .map(|(l, _)| Some((index(&l.from)?, index(&l.to)?)))
             .collect();
-        let routes = route_links(&ends, &screen, view.zoom);
+        let routes: Vec<Option<Route>> = route_links(&ends, &world)
+            .into_iter()
+            .map(|route| route.map(|r| on_screen(r, to_screen)))
+            .collect();
         let focus = self.focus.as_ref().filter(|f| index(f).is_some());
         let lit = |e: (usize, usize)| match focus {
             Some(f) => tables[e.0].name == *f || tables[e.1].name == *f,
@@ -831,9 +848,7 @@ impl App {
             response.clone().on_hover_text_at_pointer(tip);
         }
 
-        let pointer = response
-            .hover_pos()
-            .map(|p| ((p - rect.min - view.offset) / view.zoom).into());
+        let pointer = response.hover_pos().map(|p| (to_world * p).into());
         if self.session.is_some() && pointer != self.last_pointer {
             self.last_pointer = pointer;
             let msg = Msg::Pointer {
@@ -848,8 +863,7 @@ impl App {
         if self.export.is_none() {
             for (who, (diagram, pos)) in &self.peers {
                 if diagram == src.title() {
-                    let at = rect.min + view.offset + Vec2::from(*pos) * view.zoom;
-                    draw_peer(&painter, who, at);
+                    draw_peer(&painter, who, to_screen * Pos2::from(*pos));
                 }
             }
         }
@@ -1020,6 +1034,14 @@ fn place_new_tables(src: &mut Source, sizes: &[Vec2]) {
     }
 }
 
+fn world_rects(tables: &[Table], sizes: &[Vec2], dl: &DiagramLayout) -> Vec<Rect> {
+    tables
+        .iter()
+        .zip(sizes)
+        .map(|(t, s)| Rect::from_min_size(Pos2::from(dl.positions[&t.name]), *s))
+        .collect()
+}
+
 fn fit(world: &[Rect], screen: Rect) -> View {
     let Some(bounds) = world.iter().copied().reduce(|a, b| a.union(b)) else {
         return View::default();
@@ -1027,7 +1049,7 @@ fn fit(world: &[Rect], screen: Rect) -> View {
     let bounds = bounds.expand(30.0);
     let zoom = (screen.width() / bounds.width())
         .min(screen.height() / bounds.height())
-        .clamp(0.1, 1.5);
+        .clamp(MIN_ZOOM, MAX_FIT_ZOOM);
     let offset = (screen.size() - bounds.size() * zoom) / 2.0 - bounds.min.to_vec2() * zoom;
     View { offset, zoom }
 }
@@ -1167,8 +1189,8 @@ struct Route {
     to_u: Vec2,
 }
 
-fn sides(a: Rect, b: Rect, z: f32) -> (Side, Side) {
-    let room = 40.0 * z;
+fn sides(a: Rect, b: Rect) -> (Side, Side) {
+    let room = 40.0;
     if a.max.x + room <= b.min.x {
         (Side::Right, Side::Left)
     } else if b.max.x + room <= a.min.x {
@@ -1182,7 +1204,7 @@ fn sides(a: Rect, b: Rect, z: f32) -> (Side, Side) {
     }
 }
 
-fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect], z: f32) -> Vec<Option<Route>> {
+fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect]) -> Vec<Option<Route>> {
     let mut slots: Slots = Default::default();
     let mut chosen = vec![None; ends.len()];
     for (i, end) in ends.iter().enumerate() {
@@ -1190,7 +1212,7 @@ fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect], z: f32) -> Vec<O
         let (sa, sb) = if a == b {
             (Side::Right, Side::Right)
         } else {
-            sides(boxes[a], boxes[b], z)
+            sides(boxes[a], boxes[b])
         };
         chosen[i] = Some((sa, sb));
         let along = |r: Rect, s: Side| {
@@ -1219,7 +1241,7 @@ fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect], z: f32) -> Vec<O
             let t = (k as f32 + 1.0) / (n + 1.0);
             at[i][end] = match side {
                 Side::Left | Side::Right => {
-                    let top = (r.min.y + HEADER_H * z).min(r.max.y);
+                    let top = (r.min.y + HEADER_H).min(r.max.y);
                     let y = top + (r.max.y - top) * t;
                     pos2(
                         if *side == Side::Left {
@@ -1238,7 +1260,6 @@ fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect], z: f32) -> Vec<O
         }
     }
     let mut routes: Vec<Option<Route>> = Vec::with_capacity(ends.len());
-    let mut middles: Vec<(usize, bool, f32)> = Vec::new();
     for (i, end) in ends.iter().enumerate() {
         let (Some((a, b)), Some((sa, sb))) = (*end, chosen[i]) else {
             routes.push(None);
@@ -1249,71 +1270,116 @@ fn route_links(ends: &[Option<(usize, usize)>], boxes: &[Rect], z: f32) -> Vec<O
             .iter()
             .enumerate()
             .filter(|&(k, _)| k != a && k != b)
-            .map(|(_, r)| r.expand(4.0 * z))
+            .map(|(_, r)| r.expand(4.0))
             .collect();
         let pts = match (sa, sb) {
             (Side::Right, Side::Right) => {
-                let x = boxes[a].max.x.max(boxes[b].max.x) + 30.0 * z;
+                let x = boxes[a].max.x.max(boxes[b].max.x) + 30.0;
                 vec![p, pos2(x, p.y), pos2(x, q.y), q]
             }
-            (s, _) if s.vertical() => best_path(p, q, &obstacles, z),
+            (s, _) if s.vertical() => best_path(p, q, &obstacles),
             _ => {
                 let t = |p: Pos2| pos2(p.y, p.x);
                 let flipped: Vec<Rect> = obstacles
                     .iter()
                     .map(|r| Rect::from_min_max(t(r.min), t(r.max)))
                     .collect();
-                best_path(t(p), t(q), &flipped, z)
-                    .into_iter()
-                    .map(t)
-                    .collect()
+                best_path(t(p), t(q), &flipped).into_iter().map(t).collect()
             }
         };
-        if pts.len() == 4 {
-            let vertical = pts[1].x == pts[2].x;
-            middles.push((i, vertical, if vertical { pts[1].x } else { pts[1].y }));
-        }
         routes.push(Some(Route {
             pts,
             from_u: sa.out(),
             to_u: sb.out(),
         }));
     }
-    let mut buckets: std::collections::HashMap<(bool, i64), Vec<usize>> = Default::default();
-    for &(i, vertical, c) in &middles {
-        buckets
-            .entry((vertical, (c / (40.0 * z)).round() as i64))
-            .or_default()
-            .push(i);
+    spread_side_by_side(&mut routes);
+    routes
+}
+
+struct Middle {
+    route: usize,
+    vertical: bool,
+    at: f32,
+}
+
+fn middle(route: usize, pts: &[Pos2]) -> Option<Middle> {
+    if pts.len() != 4 {
+        return None;
     }
-    for (&(vertical, _), list) in &buckets {
-        let n = list.len() as f32;
-        for (k, &i) in list.iter().enumerate() {
-            let shift = (k as f32 - (n - 1.0) / 2.0) * 9.0 * z;
-            if let Some(route) = &mut routes[i] {
-                for p in &mut route.pts[1..3] {
-                    if vertical {
-                        p.x += shift;
-                    } else {
-                        p.y += shift;
-                    }
+    let vertical = pts[1].x == pts[2].x;
+    let at = if vertical { pts[1].x } else { pts[1].y };
+    Some(Middle {
+        route,
+        vertical,
+        at,
+    })
+}
+
+fn spread_side_by_side(routes: &mut [Option<Route>]) {
+    let mut middles: Vec<Middle> = routes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, route)| middle(i, &route.as_ref()?.pts))
+        .collect();
+    middles.sort_by(|a, b| a.vertical.cmp(&b.vertical).then(a.at.total_cmp(&b.at)));
+    let side_by_side =
+        |a: &Middle, b: &Middle| a.vertical == b.vertical && b.at - a.at < SIDE_BY_SIDE;
+    for group in middles.chunk_by(side_by_side) {
+        spread(routes, group);
+    }
+}
+
+fn spread(routes: &mut [Option<Route>], group: &[Middle]) {
+    let mut members: Vec<usize> = group.iter().map(|m| m.route).collect();
+    // Link order, not position: a line passing another keeps its lane instead of both jumping.
+    members.sort();
+    let n = members.len() as f32;
+    for (k, i) in members.into_iter().enumerate() {
+        let shift = (k as f32 - (n - 1.0) / 2.0) * LANE;
+        if let Some(route) = &mut routes[i] {
+            for p in &mut route.pts[1..3] {
+                if group[0].vertical {
+                    p.x += shift;
+                } else {
+                    p.y += shift;
                 }
             }
         }
     }
-    routes
 }
 
-fn best_path(p: Pos2, q: Pos2, obstacles: &[Rect], z: f32) -> Vec<Pos2> {
+fn best_path(p: Pos2, q: Pos2, obstacles: &[Rect]) -> Vec<Pos2> {
+    let candidates = candidate_paths(p, q, obstacles);
+    let fewest_hits = candidates
+        .iter()
+        .map(|path| obstacle_hits(path, obstacles))
+        .min()
+        .unwrap();
+    let least_blocked: Vec<Vec<Pos2>> = candidates
+        .into_iter()
+        .filter(|path| obstacle_hits(path, obstacles) == fewest_hits)
+        .collect();
+    let cheapest = least_blocked
+        .iter()
+        .map(|path| path_cost(path))
+        .fold(f32::INFINITY, f32::min);
+    least_blocked
+        .into_iter()
+        .find(|path| path_cost(path) < cheapest + SAME_COST)
+        .unwrap()
+}
+
+fn candidate_paths(p: Pos2, q: Pos2, obstacles: &[Rect]) -> Vec<Vec<Pos2>> {
     let d = if q.x >= p.x { 1.0 } else { -1.0 };
-    let (x1, x2) = (p.x + d * 22.0 * z, q.x - d * 22.0 * z);
+    let (x1, x2) = (p.x + d * 22.0, q.x - d * 22.0);
     let mut candidates: Vec<Vec<Pos2>> = [(p.x + q.x) / 2.0, x1, x2]
         .into_iter()
         .map(|x| vec![p, pos2(x, p.y), pos2(x, q.y), q])
         .collect();
     let (lo, hi) = (p.x.min(q.x), p.x.max(q.x));
     for r in obstacles.iter().filter(|r| r.max.x > lo && r.min.x < hi) {
-        for y in [r.min.y - 10.0 * z, r.max.y + 10.0 * z] {
+        for y in [r.min.y - 10.0, r.max.y + 10.0] {
             candidates.push(vec![
                 p,
                 pos2(x1, p.y),
@@ -1324,24 +1390,29 @@ fn best_path(p: Pos2, q: Pos2, obstacles: &[Rect], z: f32) -> Vec<Pos2> {
             ]);
         }
     }
-    let cost = |path: &Vec<Pos2>| {
-        let hits = path
-            .windows(2)
-            .map(|w| obstacles.iter().filter(|r| crosses(w[0], w[1], r)).count())
-            .sum::<usize>();
-        let length: f32 = path.windows(2).map(|w| (w[1] - w[0]).length()).sum();
-        hits as f32 * 1e6 + length + path.len() as f32 * 30.0 * z
-    };
     candidates
-        .into_iter()
-        .min_by(|a, b| cost(a).total_cmp(&cost(b)))
-        .unwrap()
+}
+
+fn obstacle_hits(path: &[Pos2], obstacles: &[Rect]) -> usize {
+    path.windows(2)
+        .map(|w| obstacles.iter().filter(|r| crosses(w[0], w[1], r)).count())
+        .sum()
+}
+
+fn path_cost(path: &[Pos2]) -> f32 {
+    let length: f32 = path.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+    length + path.len() as f32 * 30.0
 }
 
 fn crosses(u: Pos2, v: Pos2, r: &Rect) -> bool {
     let (x0, x1) = (u.x.min(v.x), u.x.max(v.x));
     let (y0, y1) = (u.y.min(v.y), u.y.max(v.y));
     x0 < r.max.x && x1 > r.min.x && y0 < r.max.y && y1 > r.min.y
+}
+
+fn on_screen(route: Route, to_screen: TSTransform) -> Route {
+    let pts = route.pts.iter().map(|&p| to_screen * p).collect();
+    Route { pts, ..route }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1530,5 +1601,124 @@ mod tests {
         let a = label_spot(&pts, size, &[], &[]);
         let b = label_spot(&pts, size, &[], &[a]);
         assert!(!a.intersects(b));
+    }
+
+    #[test]
+    fn free_links_bend_halfway() {
+        for step in 0..200 {
+            let shift = step as f32 * 3.7;
+            let p = pos2(150.3 + shift, 80.1);
+            let q = pos2(420.9 + shift * 1.3, 260.7 + shift);
+            let path = best_path(p, q, &[]);
+            assert_eq!(path[1].x, (p.x + q.x) / 2.0, "from {p:?} to {q:?}");
+        }
+    }
+
+    #[test]
+    fn a_blocked_middle_moves_the_bend_next_to_the_start() {
+        let (p, q) = (pos2(0.0, 0.0), pos2(300.0, 100.0));
+        let middle = Rect::from_min_max(pos2(140.0, 30.0), pos2(160.0, 70.0));
+        let path = best_path(p, q, &[middle]);
+        assert_eq!(path[1].x, p.x + 22.0);
+    }
+
+    #[test]
+    fn close_lines_spread_apart_wherever_they_are() {
+        for step in 0..200 {
+            let x = step as f32 * 0.25;
+            let mut routes = vec![bent_at(x), bent_at(x + 3.0), bent_at(x + 100.0)];
+            spread_side_by_side(&mut routes);
+            assert_eq!(bends(&routes), [x - 4.5, x + 7.5, x + 100.0], "at {x}");
+        }
+    }
+
+    #[test]
+    fn every_view_maps_the_screen_back_onto_the_diagram() {
+        let (ends, world) = planned_diagram();
+        let points: Vec<Pos2> = route_links(&ends, &world)
+            .into_iter()
+            .flatten()
+            .flat_map(|route| route.pts)
+            .collect();
+        let canvas = pos2(220.0, 30.0);
+        for view in zoom_and_pan_views() {
+            let (to_screen, to_world) = (view.to_screen(canvas), view.to_world(canvas));
+            for &p in &points {
+                let back = to_world * (to_screen * p);
+                assert!(back.distance(p) < 0.01, "{p:?} came back as {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_pointer() {
+        let canvas = pos2(220.0, 30.0);
+        let pointer = pos2(613.4, 377.9);
+        for view in zoom_and_pan_views() {
+            for factor in [0.5, 0.97, 1.03, 2.0] {
+                let under = view.to_world(canvas) * pointer;
+                let zoomed = view.zoomed(factor, canvas, pointer);
+                let after = zoomed.to_screen(canvas) * under;
+                assert!(after.distance(pointer) < 0.01, "{after:?} at {factor}");
+                assert!((MIN_ZOOM..=MAX_ZOOM).contains(&zoomed.zoom));
+            }
+        }
+    }
+
+    fn zoom_and_pan_views() -> Vec<View> {
+        let mut views = Vec::new();
+        let mut zoom = 0.25;
+        while zoom < 4.0 {
+            for offset in [vec2(0.0, 0.0), vec2(13.37, -7.21), vec2(-250.5, 410.25)] {
+                views.push(View { offset, zoom });
+            }
+            zoom *= 1.01;
+        }
+        views
+    }
+
+    fn planned_diagram() -> (Vec<Option<(usize, usize)>>, Vec<Rect>) {
+        let blocks = mermaid::blocks(include_str!("../tests/fixtures/library.md"));
+        let planned = &blocks
+            .iter()
+            .find(|b| b.title == "Planned")
+            .unwrap()
+            .diagram;
+        let measure = |text: &str| text.len() as f32 * 7.0;
+        let sizes: Vec<Vec2> = planned
+            .tables
+            .iter()
+            .map(|t| box_size(t, &measure))
+            .collect();
+        let index = |name: &str| planned.tables.iter().position(|t| t.name == name);
+        let ends: Vec<Option<(usize, usize)>> = planned
+            .links
+            .iter()
+            .map(|l| Some((index(&l.from)?, index(&l.to)?)))
+            .collect();
+        let edges: Vec<(usize, usize)> = ends.iter().flatten().copied().collect();
+        let world = arrange::arrange(&sizes, &edges)
+            .into_iter()
+            .zip(&sizes)
+            .map(|(p, s)| Rect::from_min_size(p, *s))
+            .collect();
+        (ends, world)
+    }
+
+    fn bent_at(x: f32) -> Option<Route> {
+        Some(Route {
+            pts: vec![
+                pos2(-50.0, 0.0),
+                pos2(x, 0.0),
+                pos2(x, 100.0),
+                pos2(250.0, 100.0),
+            ],
+            from_u: Side::Right.out(),
+            to_u: Side::Left.out(),
+        })
+    }
+
+    fn bends(routes: &[Option<Route>]) -> Vec<f32> {
+        routes.iter().flatten().map(|r| r.pts[1].x).collect()
     }
 }
