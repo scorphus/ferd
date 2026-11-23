@@ -1,7 +1,33 @@
+use crate::model::{Card, Link, Table};
 use eframe::egui::{Pos2, Vec2, pos2};
 
 const GAP_X: f32 = 170.0;
 const GAP_Y: f32 = 50.0;
+
+/// Arrange puts the start of an edge left of its end. Starting at the "one" side puts a
+/// parent left of its children, however the link is written.
+pub fn edges_of<'a>(
+    tables: &[Table],
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Vec<(usize, usize)> {
+    let index = |name: &str| tables.iter().position(|t| t.name == name);
+    links
+        .into_iter()
+        .filter_map(|link| {
+            let [start, end] = one_side_first(link);
+            Some((index(start)?, index(end)?))
+        })
+        .collect()
+}
+
+fn one_side_first(link: &Link) -> [&str; 2] {
+    let many = |card| matches!(card, Card::OneOrMore | Card::ZeroOrMore);
+    if many(link.from_card) && !many(link.to_card) {
+        [&link.to, &link.from]
+    } else {
+        [&link.from, &link.to]
+    }
+}
 
 pub fn arrange(sizes: &[Vec2], links: &[(usize, usize)]) -> Vec<Pos2> {
     let n = sizes.len();
@@ -234,11 +260,30 @@ mod tests {
         let d = &blocks[1].diagram;
         let pos = arranged_without_overlaps(d);
         let x = |n: &str| pos[index(d, n)].x;
-        for pair in ["book", "copy", "loan", "fine", "payment"].windows(2) {
+        for pair in ["book", "copy", "loan", "fine"].windows(2) {
             assert!(x(pair[0]) < x(pair[1]), "{} {}", pair[0], pair[1]);
         }
         assert!(x("member") < x("loan"));
         assert!(x("author") < x("book_author"));
+        assert!(x("payment") < x("fine"));
+    }
+
+    #[test]
+    fn links_start_at_their_one_side_or_as_written() {
+        for (link, left, right) in [
+            ("customer ||--o{ order", "customer", "order"),
+            ("order }o--|| customer", "customer", "order"),
+            ("item }|--o| order", "order", "item"),
+            ("member ||--o| card", "member", "card"),
+            ("card |o--|| member", "card", "member"),
+            ("tag }o--o{ post", "tag", "post"),
+            ("post }|--|{ tag", "post", "tag"),
+        ] {
+            let d = mermaid::parse(&format!("erDiagram\n{link} : x\n"));
+            let pos = arranged_without_overlaps(&d);
+            let x = |n: &str| pos[index(&d, n)].x;
+            assert!(x(left) < x(right), "{link}");
+        }
     }
 
     #[test]
@@ -266,12 +311,7 @@ mod tests {
             .iter()
             .map(|t| vec2(200.0, 30.0 + 19.0 * t.columns.len() as f32))
             .collect();
-        let links: Vec<(usize, usize)> = d
-            .links
-            .iter()
-            .map(|l| (index(d, &l.from), index(d, &l.to)))
-            .collect();
-        let pos = arrange(&sizes, &links);
+        let pos = arrange(&sizes, &edges_of(&d.tables, &d.links));
         let rects: Vec<Rect> = pos
             .iter()
             .zip(&sizes)

@@ -746,11 +746,7 @@ impl App {
 
         let tables = src.diagram().tables.clone();
         if std::mem::take(&mut self.arrange_pending) {
-            let index = |name: &str| tables.iter().position(|t| t.name == name);
-            let edges: Vec<(usize, usize)> = src
-                .links()
-                .filter_map(|(l, _)| Some((index(&l.from)?, index(&l.to)?)))
-                .collect();
+            let edges = arrange::edges_of(&tables, src.links().map(|(l, _)| l));
             let placed = self
                 .stats
                 .time("arrange", || arrange::arrange(&sizes, &edges));
@@ -1155,20 +1151,18 @@ fn place_new_tables(src: &mut Source, sizes: &[Vec2]) {
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    let index = |name: &str| tables.iter().position(|t| t == name);
-    let edges: Vec<(usize, usize)> = src
-        .links()
-        .filter_map(|(l, _)| Some((index(&l.from)?, index(&l.to)?)))
-        .collect();
+    let placed_before = src
+        .layout
+        .diagrams
+        .get(src.title())
+        .is_some_and(|dl| tables.iter().any(|t| dl.positions.contains_key(t)));
+    if !placed_before {
+        arrange_everything(src, &tables, sizes);
+        return;
+    }
     let cell = sizes.iter().fold(Vec2::ZERO, |a, s| a.max(*s)) + Vec2::splat(GAP);
     let cols = (tables.len() as f32).sqrt().ceil().max(1.0) as usize;
     let dl = src.diagram_layout();
-    if !tables.iter().any(|t| dl.positions.contains_key(t)) {
-        for (name, p) in tables.iter().zip(arrange::arrange(sizes, &edges)) {
-            dl.positions.insert(name.clone(), [p.x, p.y]);
-        }
-        return;
-    }
     let size_of = |name: &str| sizes[tables.iter().position(|t| t == name).unwrap()];
     for (name, size) in tables.iter().zip(sizes) {
         if dl.positions.contains_key(name) {
@@ -1189,6 +1183,15 @@ fn place_new_tables(src: &mut Source, sizes: &[Vec2]) {
             })
             .unwrap();
         dl.positions.insert(name.clone(), [spot.x, spot.y]);
+    }
+}
+
+fn arrange_everything(src: &mut Source, tables: &[String], sizes: &[Vec2]) {
+    let edges = arrange::edges_of(&src.diagram().tables, src.links().map(|(l, _)| l));
+    let placed = arrange::arrange(sizes, &edges);
+    let positions = &mut src.diagram_layout().positions;
+    for (name, p) in tables.iter().zip(placed) {
+        positions.insert(name.clone(), [p.x, p.y]);
     }
 }
 
@@ -2030,6 +2033,32 @@ mod tests {
     }
 
     #[test]
+    fn new_diagrams_are_arranged_and_new_tables_find_a_free_spot() {
+        let mut src = source_of("```mermaid\nerDiagram\n a ||--o{ b : x\n c }o--|| b : y\n```\n");
+        let size = vec2(100.0, 50.0);
+        place_new_tables(&mut src, &[size; 3]);
+        let edges = arrange::edges_of(&src.diagram().tables, &src.diagram().links);
+        let arranged = arrange::arrange(&[size; 3], &edges);
+        let before = src.diagram_layout().positions.clone();
+        for (table, p) in src.diagram().tables.iter().zip(arranged) {
+            assert_eq!(before[&table.name], [p.x, p.y], "{}", table.name);
+        }
+
+        let d = Table {
+            name: "d".into(),
+            ..Table::default()
+        };
+        src.diagrams[0].1.tables.push(d);
+        place_new_tables(&mut src, &[size; 4]);
+        let after = &src.diagram_layout().positions;
+        let spot = |name: &str| Rect::from_min_size(Pos2::from(after[name]), size);
+        for name in ["a", "b", "c"] {
+            assert_eq!(after[name], before[name], "{name} moved");
+            assert!(!spot("d").intersects(spot(name)), "d is on {name}");
+        }
+    }
+
+    #[test]
     fn only_the_table_on_top_gives_a_tip() {
         let id = Column {
             name: "id".into(),
@@ -2273,6 +2302,19 @@ mod tests {
         }
     }
 
+    fn source_of(markdown: &str) -> Source {
+        Source {
+            name: "test.md".into(),
+            text: markdown.into(),
+            path: None,
+            diagrams: parse_diagrams("test.md", markdown).unwrap(),
+            selected: 0,
+            layout: LayoutFile::default(),
+            _watcher: None,
+            changes: None,
+        }
+    }
+
     fn zoom_and_pan_views() -> Vec<View> {
         let mut views = Vec::new();
         let mut zoom = 0.25;
@@ -2304,7 +2346,7 @@ mod tests {
             .iter()
             .map(|l| Some((index(&l.from)?, index(&l.to)?)))
             .collect();
-        let edges: Vec<(usize, usize)> = ends.iter().flatten().copied().collect();
+        let edges = arrange::edges_of(&planned.tables, &planned.links);
         let world = arrange::arrange(&sizes, &edges)
             .into_iter()
             .zip(&sizes)

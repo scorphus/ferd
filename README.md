@@ -19,8 +19,9 @@ the source changes on disk, Ferd reloads it and keeps the positions.
 ## What it does
 
 - Pan by dragging empty space, zoom with the scroll wheel or a pinch.
-- Arrange places the tables in columns that follow the links, left to right,
-  with as few crossings as it can find. Undo arrange puts them back.
+- Arrange places the tables in columns that follow the links, left to right
+  from the "one" end of a link to its "many" end, with as few crossings as it
+  can find. Undo arrange puts them back.
 - Links bend at right angles around tables and carry their label and
   cardinality marks.
 - Clicking a table fades every link that does not touch it.
