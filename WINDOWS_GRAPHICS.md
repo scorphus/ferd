@@ -118,6 +118,8 @@ A cheap improvement, not tested: `eframe::wgpu::Backends::DX12 | eframe::wgpu::B
 
 Measured: PE header subsystem 2 (windowed) for the release exe, 3 (console) for the exe built with debug assertions. A windowed exe prints nothing anywhere, so a crash or error is invisible unless it is shown in a message box or read from the event log.
 
+PR #14 (not on this branch) adds `--bench`, which prints its report with `println!`, and prints the usage error for bad arguments with `eprintln!`. Once both are on `main`, the windowed release exe would show neither unless its output is redirected to a file. Not tested on Windows.
+
 ### 3. Other Windows checks (read in ferd's source, no change needed)
 
 - The user name falls back from `USER` to `USERNAME` (`src/share.rs`).
