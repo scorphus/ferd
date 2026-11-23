@@ -584,23 +584,39 @@ mod tests {
         let names: Vec<&str> = d.tables.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             names,
-            ["author", "book", "member", "book_author", "overdue"]
+            [
+                "author",
+                "book",
+                "book_author",
+                "branch",
+                "copy",
+                "member",
+                "loan",
+                "hold",
+                "card",
+                "payment",
+                "fine"
+            ]
         );
         assert_eq!(
             table(&d, "book").note.as_deref(),
-            Some("Books on the shelves.")
+            Some("One row per edition.")
         );
         let ba = table(&d, "book_author");
         assert!(column(ba, "book_id").pk && column(ba, "author_id").pk);
         assert!(!column(ba, "position").pk);
-        let borrower = column(table(&d, "book"), "borrower_id");
+        let borrower = column(table(&d, "loan"), "member_id");
         assert!(borrower.fk);
-        assert!(borrower.note.as_deref().unwrap().starts_with("Null when"));
+        assert_eq!(borrower.note.as_deref(), Some("@ref: member(id)"));
+        let hold = table(&d, "hold");
+        assert!(column(hold, "book_id").pk && column(hold, "book_id").fk);
+        assert_eq!(column(hold, "since").ty, "timestamptz");
         for (from, to, label) in [
-            ("author", "book", "author_id"),
-            ("member", "book", "borrower_id"),
-            ("book", "book_author", "book_id"),
-            ("author", "book_author", "author_id"),
+            ("member", "loan", "member_id"),
+            ("book", "hold", "book_id"),
+            ("member", "card", "member_id"),
+            ("loan", "fine", "loan_id"),
+            ("payment", "fine", "payment_id"),
         ] {
             assert!(link(&d, from, to, label), "{from} {to} {label}");
         }
@@ -608,10 +624,23 @@ mod tests {
         assert_eq!(member.note.as_deref(), Some("People who may borrow books."));
         assert_eq!(column(member, "phones").ty, "text[]");
         assert!(column(member, "phones").note.is_some());
-        assert_eq!(column(member, "joined_at").ty, "timestamp with time zone");
-        let overdue = table(&d, "overdue");
-        let cols: Vec<&str> = overdue.columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(cols, ["book_id", "member", "days"]);
-        assert_eq!(overdue.note.as_deref(), Some("Refreshed every night."));
+        let paid = column(table(&d, "fine"), "payment_id");
+        assert_eq!(paid.note.as_deref(), Some("Null until paid."));
+    }
+
+    #[test]
+    fn shop_opens_with_all_its_tables_and_links() {
+        assert_opens_with(include_str!("../tests/fixtures/shop.sql"), 52, 71);
+    }
+
+    #[test]
+    fn erp_opens_with_all_its_tables_and_links() {
+        assert_opens_with(include_str!("../tests/fixtures/erp.sql"), 400, 798);
+    }
+
+    fn assert_opens_with(sql: &str, tables: usize, links: usize) {
+        let d = parse(sql);
+        assert_eq!((d.tables.len(), d.links.len()), (tables, links));
+        assert!(d.tables.iter().all(|t| !t.columns.is_empty()));
     }
 }

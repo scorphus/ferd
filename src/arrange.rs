@@ -225,22 +225,51 @@ fn settle(col: &[usize], pos: &mut [Pos2], sizes: &[Vec2], edges: &[(usize, usiz
 mod tests {
     use super::*;
     use crate::mermaid;
+    use crate::model::Diagram;
     use eframe::egui::{Rect, vec2};
 
     #[test]
     fn library_has_no_overlaps_and_reads_left_to_right() {
         let blocks = mermaid::blocks(include_str!("../tests/fixtures/library.md"));
         let d = &blocks[1].diagram;
+        let pos = arranged_without_overlaps(d);
+        let x = |n: &str| pos[index(d, n)].x;
+        for pair in ["book", "copy", "loan", "fine", "payment"].windows(2) {
+            assert!(x(pair[0]) < x(pair[1]), "{} {}", pair[0], pair[1]);
+        }
+        assert!(x("member") < x("loan"));
+        assert!(x("author") < x("book_author"));
+    }
+
+    #[test]
+    fn shop_and_erp_have_no_overlaps() {
+        let shop = mermaid::blocks(include_str!("../tests/fixtures/shop.md"));
+        arranged_without_overlaps(&shop[0].diagram);
+        let erp = mermaid::blocks(include_str!("../tests/fixtures/erp.md"));
+        arranged_without_overlaps(&erp[0].diagram);
+    }
+
+    #[test]
+    fn cycles_do_not_hang() {
+        let sizes = vec![vec2(100.0, 50.0); 3];
+        let pos = arrange(&sizes, &[(0, 1), (1, 2), (2, 0)]);
+        assert_eq!(pos.len(), 3);
+    }
+
+    fn index(d: &Diagram, name: &str) -> usize {
+        d.tables.iter().position(|t| t.name == name).unwrap()
+    }
+
+    fn arranged_without_overlaps(d: &Diagram) -> Vec<Pos2> {
         let sizes: Vec<Vec2> = d
             .tables
             .iter()
             .map(|t| vec2(200.0, 30.0 + 19.0 * t.columns.len() as f32))
             .collect();
-        let index = |n: &str| d.tables.iter().position(|t| t.name == n).unwrap();
         let links: Vec<(usize, usize)> = d
             .links
             .iter()
-            .map(|l| (index(&l.from), index(&l.to)))
+            .map(|l| (index(d, &l.from), index(d, &l.to)))
             .collect();
         let pos = arrange(&sizes, &links);
         let rects: Vec<Rect> = pos
@@ -258,18 +287,6 @@ mod tests {
                 );
             }
         }
-        let x = |n: &str| pos[index(n)].x;
-        for pair in ["book", "copy", "loan", "fine", "payment"].windows(2) {
-            assert!(x(pair[0]) < x(pair[1]), "{} {}", pair[0], pair[1]);
-        }
-        assert!(x("member") < x("loan"));
-        assert!(x("author") < x("book_author"));
-    }
-
-    #[test]
-    fn cycles_do_not_hang() {
-        let sizes = vec![vec2(100.0, 50.0); 3];
-        let pos = arrange(&sizes, &[(0, 1), (1, 2), (2, 0)]);
-        assert_eq!(pos.len(), 3);
+        pos
     }
 }

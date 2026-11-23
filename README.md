@@ -43,6 +43,9 @@ Options go anywhere on the command line:
 - `--bench` opens the file, then zooms, pans and drags a table by itself for
   750 frames, prints the timings of each step and quits. It saves nothing.
 
+`tests/fixtures` has schemas of three sizes to try them on: `library` (3 and
+11 tables), `shop` (51) and `erp` (400), each as Markdown and SQL.
+
 `./bundle.sh [target]` builds `target/<target>/Ferd.app` for macOS, for this Mac's CPU unless a target such as `x86_64-apple-darwin` is given; `-i` installs it into `/Applications`.
 
 ## Sharing

@@ -255,8 +255,9 @@ mod tests {
                 .all(|c| c.pk && c.fk)
         );
         assert_eq!(table(d, "branch").columns.len(), 2);
-        assert!(table(d, "card").columns.is_empty());
-        assert!(table(d, "payment").columns.is_empty());
+        assert!(column(table(d, "card"), "member_id").fk);
+        let paid = column(table(d, "fine"), "payment_id");
+        assert_eq!(paid.note.as_deref(), Some("null until paid"));
         let cards = |from: &str, to: &str| {
             let l = d
                 .links
@@ -270,8 +271,34 @@ mod tests {
             (Card::ExactlyOne, Card::OneOrMore)
         );
         assert_eq!(cards("member", "card"), (Card::ExactlyOne, Card::ZeroOrOne));
-        assert_eq!(cards("loan", "fine"), (Card::ZeroOrMore, Card::ExactlyOne));
+        assert_eq!(cards("loan", "fine"), (Card::ExactlyOne, Card::ZeroOrOne));
         assert_eq!(cards("fine", "payment"), (Card::OneOrMore, Card::ZeroOrOne));
         assert!(d.links.iter().any(|l| l.label == "shelves"));
+    }
+
+    #[test]
+    fn shop_uses_every_cardinality_on_both_ends() {
+        let blocks = blocks(include_str!("../tests/fixtures/shop.md"));
+        assert_eq!(blocks.len(), 1);
+        let d = &blocks[0].diagram;
+        assert_eq!((d.tables.len(), d.links.len()), (51, 71));
+        for card in Card::ALL {
+            assert!(d.links.iter().any(|l| l.from_card == card), "from {card:?}");
+            assert!(d.links.iter().any(|l| l.to_card == card), "to {card:?}");
+        }
+        assert!(d.links.iter().any(|l| l.from == l.to));
+    }
+
+    #[test]
+    fn erp_has_everything_and_three_areas() {
+        let blocks = blocks(include_str!("../tests/fixtures/erp.md"));
+        let titles: Vec<&str> = blocks.iter().map(|b| b.title.as_str()).collect();
+        assert_eq!(titles, ["Everything", "Sales", "Inventory", "Finance"]);
+        let everything = &blocks[0].diagram;
+        assert_eq!(
+            (everything.tables.len(), everything.links.len()),
+            (400, 798)
+        );
+        assert!(everything.tables.iter().all(|t| !t.columns.is_empty()));
     }
 }

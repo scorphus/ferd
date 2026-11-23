@@ -77,6 +77,22 @@ erDiagram
         int member_id PK, FK
         timestamptz since
     }
+    card {
+        int id PK
+        int member_id FK
+        text number "printed on the card"
+    }
+    fine {
+        int id PK
+        int loan_id FK
+        int payment_id FK "null until paid"
+        numeric amount
+    }
+    payment {
+        int id PK
+        numeric amount
+        date paid_on
+    }
     author ||--|{ book_author : "is credited in"
     book ||--|{ book_author : "credits"
     book ||--o{ copy : "has copies"
@@ -86,6 +102,6 @@ erDiagram
     book ||..o{ hold : "waited for in"
     member ||..o{ hold : places
     member ||--o| card : carries
-    loan }o..|| fine : "may owe"
+    loan ||..o| fine : "may owe"
     fine }|..o| payment : "paid by"
 ```
