@@ -40,6 +40,8 @@ Options go anywhere on the command line:
   frame times with a graph, the time each drawing phase takes, what is on
   the canvas, the traffic of a shared session, and what caused the last
   repaint. Without it, none of this is measured.
+- `--bench` opens the file, then zooms, pans and drags a table by itself for
+  750 frames, prints the timings of each step and quits. It saves nothing.
 
 `./bundle.sh [target]` builds `target/<target>/Ferd.app` for macOS, for this Mac's CPU unless a target such as `x86_64-apple-darwin` is given; `-i` installs it into `/Applications`.
 

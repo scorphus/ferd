@@ -1,4 +1,5 @@
 mod arrange;
+mod bench;
 mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -24,6 +25,7 @@ use eframe::egui::{
 };
 use notify::{RecursiveMode, Watcher};
 
+use bench::{Bench, Motion};
 use layout::{DiagramLayout, LayoutFile};
 use model::{Card, Column, Diagram, Link, Table};
 use share::{Event, Msg, Session, Tally};
@@ -48,13 +50,14 @@ const SAME_COST: f32 = 0.5;
 const SIDE_BY_SIDE: f32 = 40.0;
 const LANE: f32 = 9.0;
 
-const USAGE: &str = "usage: ferd [--stats] [file | --join ticket]";
+const USAGE: &str = "usage: ferd [--stats] [--bench] [file | --join ticket]";
 
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     path: Option<PathBuf>,
     join: Option<String>,
     stats: bool,
+    bench: bool,
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
@@ -63,6 +66,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> 
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--stats") => parsed.stats = true,
+            Some("--bench") => parsed.bench = true,
             Some("--join") => {
                 let ticket = args.next().ok_or("--join needs a ticket")?;
                 parsed.join = Some(ticket.to_string_lossy().into_owned());
@@ -76,6 +80,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> 
     }
     if parsed.path.is_some() && parsed.join.is_some() {
         return Err("open a file or join, not both".into());
+    }
+    if parsed.bench && parsed.path.is_none() {
+        return Err("--bench needs a file".into());
     }
     Ok(parsed)
 }
@@ -103,7 +110,9 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             cc.egui_ctx.set_fonts(canvas_fonts());
             let mut app = App {
-                stats: Stats::new(args.stats),
+                stats: Stats::new(args.stats || args.bench),
+                show_stats: args.stats,
+                bench: args.bench.then(Bench::default),
                 ..App::default()
             };
             if let Some(path) = args.path {
@@ -274,6 +283,9 @@ struct App {
     arrange_pending: bool,
     before_arrange: Option<(String, BTreeMap<String, [f32; 2]>)>,
     stats: Stats,
+    show_stats: bool,
+    bench: Option<Bench>,
+    motion: Option<Motion>,
     text_zoom: TextZoom,
 }
 
@@ -772,6 +784,9 @@ impl App {
             self.view = fit(&world, rect);
             self.fit_pending = false;
         }
+        if let Some(motion) = self.motion.take() {
+            self.view = apply_motion(motion, self.view, rect, src);
+        }
 
         let to_world = self.view.to_world(rect.min);
 
@@ -996,12 +1011,56 @@ impl App {
             None => {}
         }
     }
+
+    fn drive_bench(&mut self, ctx: &egui::Context, cpu: Option<f32>) {
+        let Some(mut bench) = self.bench.take() else {
+            return;
+        };
+        bench.previous_frame_took(cpu);
+        match bench.next_motion() {
+            Some(motion) => {
+                self.motion = Some(motion);
+                self.bench = Some(bench);
+                ctx.request_repaint();
+            }
+            None => {
+                println!("{}", bench.report(&self.bench_subject(ctx)));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn bench_subject(&self, ctx: &egui::Context) -> String {
+        let build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let window = ctx.content_rect().size();
+        let setup = format!(
+            "{build} build, {}x pixels per point, window {:.0}×{:.0}",
+            ctx.pixels_per_point(),
+            window.x,
+            window.y
+        );
+        let Some(src) = &self.source else {
+            return format!("ferd bench: no diagram ({})\n{setup}", self.status);
+        };
+        format!(
+            "ferd bench: {}, diagram \"{}\", {} tables, {} links\n{setup}",
+            src.name,
+            src.title(),
+            src.diagram().tables.len(),
+            src.links().count()
+        )
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let cpu = frame.info().cpu_usage;
         self.stats.begin_frame(cpu);
+        self.drive_bench(ui.ctx(), cpu);
         #[cfg(target_os = "macos")]
         for path in macos::opened(ui.ctx()) {
             self.open(ui.ctx(), path);
@@ -1042,12 +1101,15 @@ impl eframe::App for App {
         {
             record_network(&mut self.stats, session);
         }
-        if self.stats.is_on() && self.export.is_none() {
+        if self.show_stats && self.export.is_none() {
             let started = Instant::now();
             self.stats.show(ui.ctx(), canvas.response.rect);
             self.stats.record("overlay", started.elapsed());
         }
         self.stats.end_frame();
+        if let (Some(bench), Some(ui_ms)) = (&mut self.bench, self.stats.last_ui()) {
+            bench.record(ui_ms, self.stats.frame_phases());
+        }
     }
 }
 
@@ -1190,6 +1252,36 @@ fn painted_shapes(painter: &egui::Painter) -> usize {
     painter
         .ctx()
         .graphics(|g| g.get(layer).map_or(0, |shapes| shapes.all_entries().len()))
+}
+
+fn apply_motion(motion: Motion, view: View, canvas: Rect, src: &mut Source) -> View {
+    match motion {
+        Motion::Still => view,
+        Motion::Zoom(factor) => view.zoomed(factor, canvas.min, canvas.center()),
+        Motion::Pan(by) => View {
+            offset: view.offset + by,
+            ..view
+        },
+        Motion::Drag(by) => {
+            if let Some(name) = busiest_table(src)
+                && let Some(p) = src.diagram_layout().positions.get_mut(&name)
+            {
+                p[0] += by.x;
+                p[1] += by.y;
+            }
+            view
+        }
+    }
+}
+
+fn busiest_table(src: &Source) -> Option<String> {
+    let mut degree: BTreeMap<&str, usize> = BTreeMap::new();
+    for (link, _) in src.links() {
+        *degree.entry(&link.from).or_default() += 1;
+        *degree.entry(&link.to).or_default() += 1;
+    }
+    let busiest = degree.into_iter().max_by_key(|&(_, d)| d)?;
+    Some(busiest.0.to_string())
 }
 
 fn world_rects(tables: &[Table], sizes: &[Vec2], dl: &DiagramLayout) -> Vec<Rect> {
@@ -1911,9 +2003,10 @@ mod tests {
         let expected = Args {
             path: Some(PathBuf::from("shop.md")),
             stats: true,
+            bench: true,
             ..Args::default()
         };
-        assert_eq!(args(&["--stats", "shop.md"]), Ok(expected));
+        assert_eq!(args(&["--stats", "--bench", "shop.md"]), Ok(expected));
         let stats_last = args(&["shop.md", "--stats"]).unwrap();
         assert!(stats_last.stats && stats_last.path.is_some());
         let joining = args(&["--join", "ferd00", "--stats"]).unwrap();
@@ -1929,6 +2022,8 @@ mod tests {
             &["--fast", "shop.md"],
             &["a.md", "b.md"],
             &["a.md", "--join", "ferd00"],
+            &["--bench"],
+            &["--bench", "--join", "ferd00"],
         ] {
             assert!(args(words).is_err(), "{words:?}");
         }
@@ -2152,6 +2247,29 @@ mod tests {
                 assert!(after.distance(pointer) < 0.01, "{after:?} at {factor}");
                 assert!((MIN_ZOOM..=MAX_ZOOM).contains(&zoomed.zoom));
             }
+        }
+    }
+
+    #[test]
+    fn every_bench_zoom_frame_zooms_from_any_fitted_view() {
+        let (canvas, centre) = (pos2(220.0, 30.0), pos2(860.0, 460.0));
+        for start in [MIN_ZOOM, MAX_FIT_ZOOM] {
+            let mut view = View {
+                offset: Vec2::ZERO,
+                zoom: start,
+            };
+            let mut bench = Bench::default();
+            while let Some(motion) = bench.next_motion() {
+                let Motion::Zoom(factor) = motion else {
+                    continue;
+                };
+                let wanted = view.zoom * factor;
+                view = view.zoomed(factor, canvas, centre);
+                let off = (view.zoom / wanted - 1.0).abs();
+                assert!(off < 1e-4, "{wanted} became {} from {start}", view.zoom);
+            }
+            let back = (view.zoom / start - 1.0).abs();
+            assert!(back < 1e-3, "{start} came back as {}", view.zoom);
         }
     }
 

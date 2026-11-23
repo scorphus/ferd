@@ -189,6 +189,14 @@ impl Stats {
         }
     }
 
+    pub fn last_ui(&self) -> Option<f32> {
+        self.last_ui
+    }
+
+    pub fn frame_phases(&self) -> &[(&'static str, f32)] {
+        &self.this_frame
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, canvas: Rect) {
         // egui only draws when something changes, which would freeze the readout while idle.
         ctx.request_repaint_after(REFRESH);
@@ -440,7 +448,7 @@ mod tests {
         let start = Instant::now();
         stats.begin_frame_at(start, None);
         stats.end_frame();
-        let ui = stats.last_ui.unwrap();
+        let ui = stats.last_ui().unwrap();
         stats.begin_frame_at(start + Duration::from_millis(16), Some(0.010));
         let paint = stats.paint.summary().unwrap().last;
         assert!((paint - (10.0 - ui)).abs() < 1e-3);
@@ -453,7 +461,7 @@ mod tests {
         stats.record("routing", Duration::from_millis(2));
         stats.record("routing", Duration::from_millis(3));
         stats.end_frame();
-        assert_eq!(stats.this_frame, [("routing", 5.0)]);
+        assert_eq!(stats.frame_phases(), [("routing", 5.0)]);
         assert_eq!(stats.phases[0].1.summary().unwrap().last, 5.0);
     }
 
@@ -485,6 +493,6 @@ mod tests {
         assert_eq!(routed, 7);
         assert_eq!((stats.frames, stats.ticks.len()), (0, 0));
         assert!(stats.cpu.0.is_empty() && stats.ui.0.is_empty() && stats.phases.is_empty());
-        assert!(stats.this_frame.is_empty() && stats.readings.is_empty());
+        assert!(stats.frame_phases().is_empty() && stats.readings.is_empty());
     }
 }
