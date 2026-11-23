@@ -34,13 +34,21 @@ the source changes on disk, Ferd reloads it and keeps the positions.
 cargo run --release -- path/to/schema.md
 ```
 
+Options go anywhere on the command line:
+
+- `--stats` shows a debug overlay in the top right corner of the canvas:
+  frame times with a graph, the time each drawing phase takes, what is on
+  the canvas, the traffic of a shared session, and what caused the last
+  repaint. Without it, none of this is measured.
+
 `./bundle.sh [target]` builds `target/<target>/Ferd.app` for macOS, for this Mac's CPU unless a target such as `x86_64-apple-darwin` is given; `-i` installs it into `/Applications`.
 
 ## Sharing
 
 Share copies a ticket to the clipboard. The other person presses Join… and
 pastes it, or runs `ferd --join <ticket>`. They need no copy of the file: the
-source and layout come over the connection, and only the host saves.
+source and layout come over the connection, and only the host saves. Both
+sides can run on one machine, in two terminals.
 
 Connections go straight between the two machines with iroh
 (https://iroh.computer). When no direct path exists, the traffic goes

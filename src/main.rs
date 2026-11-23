@@ -6,8 +6,10 @@ mod mermaid;
 mod model;
 mod share;
 mod sql;
+mod stats;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
@@ -24,7 +26,8 @@ use notify::{RecursiveMode, Watcher};
 
 use layout::{DiagramLayout, LayoutFile};
 use model::{Card, Column, Diagram, Link, Table};
-use share::{Event, Msg, Session};
+use share::{Event, Msg, Session, Tally};
+use stats::{Stats, Value};
 
 const FONT: f32 = 13.0;
 const LABEL_FONT: f32 = FONT * 0.85;
@@ -45,15 +48,48 @@ const SAME_COST: f32 = 0.5;
 const SIDE_BY_SIDE: f32 = 40.0;
 const LANE: f32 = 9.0;
 
+const USAGE: &str = "usage: ferd [--stats] [file | --join ticket]";
+
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    path: Option<PathBuf>,
+    join: Option<String>,
+    stats: bool,
+}
+
+fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
+    let mut parsed = Args::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--stats") => parsed.stats = true,
+            Some("--join") => {
+                let ticket = args.next().ok_or("--join needs a ticket")?;
+                parsed.join = Some(ticket.to_string_lossy().into_owned());
+            }
+            Some(option) if option.starts_with("--") => {
+                return Err(format!("unknown option {option}"));
+            }
+            _ if parsed.path.is_some() => return Err("open one file at a time".into()),
+            _ => parsed.path = Some(PathBuf::from(arg)),
+        }
+    }
+    if parsed.path.is_some() && parsed.join.is_some() {
+        return Err("open a file or join, not both".into());
+    }
+    Ok(parsed)
+}
+
 fn main() -> eframe::Result {
+    let args = match parse_args(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("ferd: {e}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
     #[cfg(target_os = "macos")]
     macos::listen();
-    let mut args = std::env::args_os().skip(1);
-    let first = args.next();
-    let (path, ticket) = match first {
-        Some(a) if a == "--join" => (None, args.next().map(|t| t.to_string_lossy().into_owned())),
-        other => (other.map(PathBuf::from), None),
-    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
@@ -66,11 +102,14 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_fonts(canvas_fonts());
-            let mut app = App::default();
-            if let Some(path) = path {
+            let mut app = App {
+                stats: Stats::new(args.stats),
+                ..App::default()
+            };
+            if let Some(path) = args.path {
                 app.open(&cc.egui_ctx, path);
             }
-            if let Some(ticket) = ticket {
+            if let Some(ticket) = args.join {
                 app.join(&cc.egui_ctx, &ticket);
             }
             Ok(Box::new(app))
@@ -234,6 +273,7 @@ struct App {
     focus: Option<String>,
     arrange_pending: bool,
     before_arrange: Option<(String, BTreeMap<String, [f32; 2]>)>,
+    stats: Stats,
     text_zoom: TextZoom,
 }
 
@@ -353,12 +393,12 @@ impl App {
     }
 
     fn share(&mut self, ctx: &egui::Context) {
-        self.session = Some(Session::host(ctx));
+        self.session = Some(Session::host(ctx, self.stats.is_on()));
         self.status = "starting to share…".into();
     }
 
     fn join(&mut self, ctx: &egui::Context, ticket: &str) {
-        match Session::join(ctx, ticket) {
+        match Session::join(ctx, ticket, self.stats.is_on()) {
             Ok(s) => {
                 self.session = Some(s);
                 self.source = None;
@@ -672,6 +712,7 @@ impl App {
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        let shapes_before = self.stats.is_on().then(|| painted_shapes(&painter));
         let visuals = ui.visuals().clone();
         painter.rect_filled(rect, 0.0, visuals.extreme_bg_color);
         let Some(src) = &mut self.source else { return };
@@ -682,13 +723,14 @@ impl App {
                 .size()
                 .x
         };
-        let sizes: Vec<Vec2> = src
-            .diagram()
-            .tables
-            .iter()
-            .map(|t| box_size(t, &measure))
-            .collect();
-        place_new_tables(src, &sizes);
+        let sizes: Vec<Vec2> = self.stats.time("sizes", || {
+            src.diagram()
+                .tables
+                .iter()
+                .map(|t| box_size(t, &measure))
+                .collect()
+        });
+        self.stats.time("placing", || place_new_tables(src, &sizes));
 
         let tables = src.diagram().tables.clone();
         if std::mem::take(&mut self.arrange_pending) {
@@ -697,7 +739,9 @@ impl App {
                 .links()
                 .filter_map(|(l, _)| Some((index(&l.from)?, index(&l.to)?)))
                 .collect();
-            let placed = arrange::arrange(&sizes, &edges);
+            let placed = self
+                .stats
+                .time("arrange", || arrange::arrange(&sizes, &edges));
             let title = src.title().to_string();
             let positions = &mut src.diagram_layout().positions;
             self.before_arrange = Some((title.clone(), positions.clone()));
@@ -803,7 +847,7 @@ impl App {
             .iter()
             .map(|(l, _)| Some((index(&l.from)?, index(&l.to)?)))
             .collect();
-        let routes = route_links(&ends, &world);
+        let routes = self.stats.time("routing", || route_links(&ends, &world));
         let focus = self.focus.as_ref().filter(|f| index(f).is_some());
         let lit = |e: (usize, usize)| match focus {
             Some(f) => tables[e.0].name == *f || tables[e.1].name == *f,
@@ -819,33 +863,38 @@ impl App {
         }
         let mut pen = Pen::new(&painter, to_screen, text_zoom);
         let mut labels: Vec<(&str, &Route)> = Vec::new();
-        for pass in [false, true] {
-            for ((link, by_hand), (end, route)) in links.iter().zip(ends.iter().zip(&routes)) {
-                let (Some(end), Some(route)) = (end, route) else {
-                    continue;
-                };
-                if lit(*end) != pass {
-                    continue;
-                }
-                let color = match (focus, pass) {
-                    (Some(_), true) => base.gamma_multiply(0.9),
-                    (Some(_), false) => base.gamma_multiply(0.08),
-                    (None, _) => base.gamma_multiply(0.55),
-                };
-                draw_route(&pen, link, *by_hand, route, color, &visuals);
-                if pass && !link.label.is_empty() {
-                    labels.push((&link.label, route));
+        self.stats.time("links", || {
+            for pass in [false, true] {
+                for ((link, by_hand), (end, route)) in links.iter().zip(ends.iter().zip(&routes)) {
+                    let (Some(end), Some(route)) = (end, route) else {
+                        continue;
+                    };
+                    if lit(*end) != pass {
+                        continue;
+                    }
+                    let color = match (focus, pass) {
+                        (Some(_), true) => base.gamma_multiply(0.9),
+                        (Some(_), false) => base.gamma_multiply(0.08),
+                        (None, _) => base.gamma_multiply(0.55),
+                    };
+                    draw_route(&pen, link, *by_hand, route, color, &visuals);
+                    if pass && !link.label.is_empty() {
+                        labels.push((&link.label, route));
+                    }
                 }
             }
-        }
-        if readable(LABEL_FONT * to_screen.scaling) {
+        });
+        let show_labels = readable(LABEL_FONT * to_screen.scaling);
+        if show_labels {
             let label_size = |text: &str| {
                 let font = FontId::proportional(LABEL_FONT);
                 let galley = painter.layout_no_wrap(text.to_string(), font, Color32::WHITE);
                 galley.size() + Vec2::splat(4.0)
             };
-            let spots = place_labels(&labels, &world, label_size);
-            draw_labels(&mut pen, &labels, &spots, &visuals);
+            self.stats.time("labels", || {
+                let spots = place_labels(&labels, &world, label_size);
+                draw_labels(&mut pen, &labels, &spots, &visuals);
+            });
         }
 
         let mut order: Vec<usize> = (0..tables.len()).collect();
@@ -855,10 +904,12 @@ impl App {
             order.retain(|&j| j != i);
             order.push(i);
         }
-        for &i in &order {
-            draw_table(&mut pen, &tables[i], world[i], &visuals);
-        }
-        pen.finish();
+        self.stats.time("tables", || {
+            for &i in &order {
+                draw_table(&mut pen, &tables[i], world[i], &visuals);
+            }
+        });
+        self.stats.time("text", || pen.finish());
         let hover = response.hover_pos().filter(|_| self.export.is_none());
         let tip = hover.and_then(|p| hover_tip(&tables, &world, &order, to_world * p));
         if let Some(tip) = tip
@@ -884,6 +935,19 @@ impl App {
                 if diagram == src.title() {
                     draw_peer(&painter, who, to_screen * Pos2::from(*pos));
                 }
+            }
+        }
+        if let Some(before) = shapes_before {
+            let labels_shown = if show_labels { labels.len() } else { 0 };
+            let counts = [
+                ("tables", tables.len()),
+                ("links", links.len()),
+                ("routes", routes.iter().flatten().count()),
+                ("labels", labels_shown),
+                ("shapes", painted_shapes(&painter) - before),
+            ];
+            for (name, value) in counts {
+                self.stats.count("scene", name, value);
             }
         }
 
@@ -935,7 +999,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let cpu = frame.info().cpu_usage;
+        self.stats.begin_frame(cpu);
         #[cfg(target_os = "macos")]
         for path in macos::opened(ui.ctx()) {
             self.open(ui.ctx(), path);
@@ -970,7 +1036,18 @@ impl eframe::App for App {
                 });
             self.show_join &= open;
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
+        let canvas = egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
+        if self.stats.is_on()
+            && let Some(session) = &self.session
+        {
+            record_network(&mut self.stats, session);
+        }
+        if self.stats.is_on() && self.export.is_none() {
+            let started = Instant::now();
+            self.stats.show(ui.ctx(), canvas.response.rect);
+            self.stats.record("overlay", started.elapsed());
+        }
+        self.stats.end_frame();
     }
 }
 
@@ -1051,6 +1128,68 @@ fn place_new_tables(src: &mut Source, sizes: &[Vec2]) {
             .unwrap();
         dl.positions.insert(name.clone(), [spot.x, spot.y]);
     }
+}
+
+fn record_network(stats: &mut Stats, session: &Session) {
+    let Some(traffic) = session.traffic() else {
+        return;
+    };
+    let (sent, received) = (
+        Tally::total(traffic.sent.values()),
+        Tally::total(traffic.received.values()),
+    );
+    let wires = &traffic.wires;
+    let direct = wires.iter().filter(|w| w.direct).count();
+    let slowest = wires.iter().filter_map(|w| w.rtt).max();
+    let flow = traffic.per_second;
+    let role = if session.hosting { "host" } else { "guest" };
+    let readings = [
+        ("role", Value::Text(role.into())),
+        ("peers", Value::Count(wires.len() as u64)),
+        ("msgs out/s", Value::Count(flow.messages_out.round() as u64)),
+        ("msgs in/s", Value::Count(flow.messages_in.round() as u64)),
+        ("wire out/s", Value::Bytes(flow.wire_out)),
+        ("wire in/s", Value::Bytes(flow.wire_in)),
+        ("sent", Value::Bytes(sent.bytes as f64)),
+        ("received", Value::Bytes(received.bytes as f64)),
+        (
+            "direct",
+            Value::Text(format!("{direct} of {}", wires.len())),
+        ),
+        (
+            "lost",
+            Value::Count(wires.iter().map(|w| w.lost_packets).sum()),
+        ),
+    ];
+    for (name, value) in readings {
+        stats.set("network", name, value);
+    }
+    if let Some(rtt) = slowest {
+        stats.set("network", "rtt", Value::Millis(rtt.as_secs_f32() * 1000.0));
+    }
+    let mut kinds: Vec<&'static str> = traffic.sent.keys().copied().collect();
+    kinds.extend(
+        traffic
+            .received
+            .keys()
+            .filter(|k| !traffic.sent.contains_key(*k)),
+    );
+    for kind in kinds {
+        let out = traffic.sent.get(kind).map_or(0, |t| t.messages);
+        let came = traffic.received.get(kind).map_or(0, |t| t.messages);
+        stats.set(
+            "messages out/in",
+            kind,
+            Value::Text(format!("{out}/{came}")),
+        );
+    }
+}
+
+fn painted_shapes(painter: &egui::Painter) -> usize {
+    let layer = painter.layer_id();
+    painter
+        .ctx()
+        .graphics(|g| g.get(layer).map_or(0, |shapes| shapes.all_entries().len()))
 }
 
 fn world_rects(tables: &[Table], sizes: &[Vec2], dl: &DiagramLayout) -> Vec<Rect> {
@@ -1762,6 +1901,38 @@ fn save_png(shot: &ColorImage, crop: Rect, ppp: f32, path: &Path) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(words: &[&str]) -> Result<Args, String> {
+        parse_args(words.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn options_go_anywhere() {
+        let expected = Args {
+            path: Some(PathBuf::from("shop.md")),
+            stats: true,
+            ..Args::default()
+        };
+        assert_eq!(args(&["--stats", "shop.md"]), Ok(expected));
+        let stats_last = args(&["shop.md", "--stats"]).unwrap();
+        assert!(stats_last.stats && stats_last.path.is_some());
+        let joining = args(&["--join", "ferd00", "--stats"]).unwrap();
+        assert_eq!(joining.join.as_deref(), Some("ferd00"));
+        assert!(joining.stats);
+        assert_eq!(args(&[]), Ok(Args::default()));
+    }
+
+    #[test]
+    fn bad_arguments_are_refused() {
+        for words in [
+            &["--join"][..],
+            &["--fast", "shop.md"],
+            &["a.md", "b.md"],
+            &["a.md", "--join", "ferd00"],
+        ] {
+            assert!(args(words).is_err(), "{words:?}");
+        }
+    }
 
     #[test]
     fn only_the_table_on_top_gives_a_tip() {
